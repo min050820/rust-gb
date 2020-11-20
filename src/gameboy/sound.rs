@@ -11,7 +11,7 @@ const FREQ_DIVISOR: i32 = 4;
 const MASTER_FREQ: i32 = MASTER_CLOCK / FREQ_DIVISOR;
 
 struct Callback {
-    audio_rx: Receiver<[f32; 256]>,
+    audio_rx: Receiver<[[f32; 2]; 256]>,
 }
 
 impl AudioCallback for Callback {
@@ -20,7 +20,10 @@ impl AudioCallback for Callback {
     fn callback(&mut self, buf: &mut [f32]) {
         match self.audio_rx.recv_timeout(Duration::from_millis(30)) {
             Ok(x) => {
-                buf.copy_from_slice(&x);
+                for i in 0..x.len() {
+                    buf[i * 2] = x[i][0];
+                    buf[i * 2 + 1] = x[i][1];
+                }
             },
             Err(_) => {
                 for i in 0..buf.len() {
@@ -40,8 +43,8 @@ struct AudioProcessor {
     input_buffer_pos: usize,
     output_buffer_pos: usize,
     output_buffer_cnt: i32,
-    input_buffer: [f32; 1024],
-    output_buffer: [f32; 1024],
+    input_buffer: [[f32; 2]; 1024],
+    output_buffer: [[f32; 2]; 1024],
 }
 
 // Can only process [high freq] -> [low freq]
@@ -52,13 +55,14 @@ impl AudioProcessor {
             input_buffer_pos: 0,
             output_buffer_pos: 0,
             output_buffer_cnt: 0,
-            input_buffer: [0.; 1024],
-            output_buffer: [0.; 1024],
+            input_buffer: [[0.; 2]; 1024],
+            output_buffer: [[0.; 2]; 1024],
         }
     }
 
-    fn push(&mut self, sample: f32) {
-        self.input_buffer[self.input_buffer_pos] = sample;
+    fn push(&mut self, sample_l: f32, sample_r: f32) {
+        self.input_buffer[self.input_buffer_pos][0] = sample_l;
+        self.input_buffer[self.input_buffer_pos][1] = sample_r;
         self.input_buffer_pos += 1;
         if self.input_buffer_pos == self.input_buffer.len() {
             self.process();
@@ -69,12 +73,14 @@ impl AudioProcessor {
     fn high_pass(&mut self) {
         let mut sum = 0.0;
         for i in 0..self.input_buffer.len() {
-            sum += self.input_buffer[i];
+            sum += self.input_buffer[i][0];
+            sum += self.input_buffer[i][1];
         }
-        sum /= self.input_buffer.len() as f32;
+        sum /= (self.input_buffer.len() * 2) as f32;
         self.high_pass_average = (self.high_pass_average * 0.98) + (sum * 0.02);
         for i in 0..self.input_buffer.len() {
-            self.input_buffer[i] -= self.high_pass_average;
+            self.input_buffer[i][0] -= self.high_pass_average;
+            self.input_buffer[i][1] -= self.high_pass_average;
         }
     }
 
@@ -82,24 +88,27 @@ impl AudioProcessor {
         self.high_pass();
         let pack_ratio = f64::round(MASTER_FREQ as f64 / 48000.0) as i32;
         for i in 0..self.input_buffer.len() {
-            self.output_buffer[self.output_buffer_pos] += self.input_buffer[i];
+            self.output_buffer[self.output_buffer_pos][0] += self.input_buffer[i][0];
+            self.output_buffer[self.output_buffer_pos][1] += self.input_buffer[i][1];
             self.output_buffer_cnt += 1;
             if self.output_buffer_cnt >= pack_ratio {
-                self.output_buffer[self.output_buffer_pos] /= pack_ratio as f32;
+                self.output_buffer[self.output_buffer_pos][0] /= pack_ratio as f32;
+                self.output_buffer[self.output_buffer_pos][1] /= pack_ratio as f32;
                 self.output_buffer_cnt = 0;
                 self.output_buffer_pos += 1;
-                self.output_buffer[self.output_buffer_pos] = 0.;
+                self.output_buffer[self.output_buffer_pos][0] = 0.;
+                self.output_buffer[self.output_buffer_pos][1] = 0.;
             }
         }
     }
 
-    fn pop(&mut self) -> Option<[f32; 256]> {
+    fn pop(&mut self) -> Option<[[f32; 2]; 256]> {
         // Last sample is not yet complete; Don't use that sample
         if self.output_buffer_pos <= 256 {
             None
         }
         else {
-            let mut ret = [0.; 256];
+            let mut ret = [[0.; 2]; 256];
             ret.copy_from_slice(&self.output_buffer[0..256]);
             for i in 256..self.output_buffer_pos {
                 self.output_buffer[i-256] = self.output_buffer[i];
@@ -565,7 +574,7 @@ pub struct Sound {
     audio_cvt: AudioProcessor,
     audio: AudioSubsystem,
     player: AudioDevice<Callback>,
-    audio_tx: SyncSender<[f32; 256]>,
+    audio_tx: SyncSender<[[f32; 2]; 256]>,
 }
 
 impl Sound {
@@ -574,7 +583,7 @@ impl Sound {
         let audio = sdl.audio().unwrap();
         let spec = AudioSpecDesired {
             freq: Some(48000),
-            channels: Some(1),
+            channels: Some(2),
             samples: Some(256)
         };
         let player = audio.open_playback(None, &spec, |spec| {
@@ -598,8 +607,8 @@ impl Sound {
         }
     }
 
-    fn write_sample(&mut self, sample: f32) {
-        self.audio_cvt.push(sample);
+    fn write_sample(&mut self, sample_l: f32, sample_r: f32) {
+        self.audio_cvt.push(sample_l, sample_r);
         match self.audio_cvt.pop() {
             Some(x) => {
                 self.audio_tx.send(x).unwrap();
@@ -684,8 +693,7 @@ impl Sound {
             }
             sample_l *= 0.25 * (((self.nr50 >> 4) & 7) as f32 / 7.);
 
-            let sample = (sample_l + sample_r) * 0.5;
-            self.write_sample(sample);
+            self.write_sample(sample_l, sample_r);
             self.clock.tick();
         }
 
