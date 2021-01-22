@@ -1,7 +1,7 @@
 # rust-gb
 A gameboy emulator written in rust.
 
-## Why create another emulator? There's a bunch of gameboy emulators!
+## Why create another one when there are a bunch of gameboy emulators out there?
 I wanted to extend my skills, and emulators looks like a black magic to me.
 So I decided to write an emulator.
 I feel like I understand computers better.
